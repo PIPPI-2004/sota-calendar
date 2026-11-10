@@ -6,9 +6,6 @@ import os
 import pandas as pd
 import streamlit as st
 
-# =========================
-# 基本設定 ＆ 右上メニュー非表示CSS
-# =========================
 st.set_page_config(
     page_title="蒼大 やることリスト ＆ 成績管理",
     page_icon="📚",
@@ -95,9 +92,6 @@ DEFAULT_SPECIAL = {
 }
 
 
-# =========================
-# データ保存・読み込み関数
-# =========================
 def load_json(filepath):
     if os.path.exists(filepath):
         with open(filepath, "r", encoding="utf-8") as f:
@@ -148,9 +142,6 @@ def get_day_events(target_date):
     return events
 
 
-# =========================
-# メイン画面（タブ切り替え）
-# =========================
 st.title("📚 蒼大 やることリスト ＆ 成績管理")
 st.caption("2026年11月〜2027年2月 入試直前ダッシュボード")
 
@@ -158,9 +149,7 @@ tab_cal, tab_score = st.tabs(
     ["📅 学習カレンダー", "📊 テスト成績・志望校管理"]
 )
 
-# ---------------------------------------------------------
 # TAB 1: 学習カレンダー
-# ---------------------------------------------------------
 with tab_cal:
     col1, col2 = st.columns(2)
 
@@ -319,9 +308,7 @@ with tab_cal:
                     save_json(DATA_FILE, st.session_state.db)
                     st.rerun()
 
-# ---------------------------------------------------------
 # TAB 2: 科目別テスト成績・志望校管理
-# ---------------------------------------------------------
 with tab_score:
     st.header("🏆 志望校 ＆ 科目別成績ダッシュボード")
 
