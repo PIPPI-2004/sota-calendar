@@ -1,5 +1,6 @@
 import calendar
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 import html
 import json
 import os
@@ -92,27 +93,139 @@ DEFAULT_SPECIAL = {
 }
 
 
-def load_json(filepath):
+# =====================================================================
+# データの保存先
+#   Streamlit の Secrets に [gsheets] の設定があれば Googleスプレッドシートに保存。
+#   設定がなければ、これまでどおりローカルの JSON ファイルに保存する。
+#   （Streamlit Community Cloud のローカルファイルは、スリープや再起動で消えるため、
+#     本番ではスプレッドシート保存を使う）
+# =====================================================================
+SHEET_TAB = "data"          # スプレッドシート内のシート名（自動作成）
+SCHEDULE_PREFIX = "schedule/"
+SCORES_KEY = "scores"
+
+
+def _load_local(filepath):
     if os.path.exists(filepath):
         with open(filepath, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
-def save_json(filepath, data):
+def _save_local(filepath, data):
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-if "db" not in st.session_state:
-    st.session_state.db = load_json(DATA_FILE)
+def _use_gsheets():
+    try:
+        return "gsheets" in st.secrets
+    except Exception:
+        return False
 
-if "scores_db" not in st.session_state:
-    st.session_state.scores_db = load_json(SCORES_FILE)
-    if "schools" not in st.session_state.scores_db:
-        st.session_state.scores_db["schools"] = []
-    if "results" not in st.session_state.scores_db:
-        st.session_state.scores_db["results"] = []
+
+@st.cache_resource
+def _get_worksheet():
+    import gspread
+
+    conf = st.secrets["gsheets"]
+    info = json.loads(conf["service_account_json"])
+    client = gspread.service_account_from_dict(info)
+    book = client.open_by_key(conf["spreadsheet_id"])
+    try:
+        ws = book.worksheet(SHEET_TAB)
+    except gspread.WorksheetNotFound:
+        ws = book.add_worksheet(title=SHEET_TAB, rows=500, cols=3)
+        ws.update(
+            range_name="A1:C1",
+            values=[["key", "value", "updated_at"]],
+            value_input_option="RAW",
+        )
+    return ws
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _read_sheet():
+    """シート全体を {key: データ} の辞書で返す（30秒キャッシュ）"""
+    rows = _get_worksheet().get_all_values()
+    out = {}
+    for row in rows[1:]:
+        if len(row) >= 2 and row[0]:
+            try:
+                out[row[0]] = json.loads(row[1])
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def _upsert(key, value):
+    """key の行があれば上書き、なければ末尾に追加"""
+    ws = _get_worksheet()
+    now = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M:%S")
+    row = [key, json.dumps(value, ensure_ascii=False), now]
+    keys = ws.col_values(1)
+    if key in keys:
+        r = keys.index(key) + 1
+        ws.update(range_name=f"A{r}:C{r}", values=[row], value_input_option="RAW")
+    else:
+        ws.append_row(row, value_input_option="RAW")
+    _read_sheet.clear()
+
+
+def load_json(filepath):
+    if not _use_gsheets():
+        return _load_local(filepath)
+
+    data = _read_sheet()
+    if filepath == DATA_FILE:
+        return {
+            k[len(SCHEDULE_PREFIX):]: v
+            for k, v in data.items()
+            if k.startswith(SCHEDULE_PREFIX)
+        }
+    if filepath == SCORES_FILE:
+        if SCORES_KEY in data:
+            return data[SCORES_KEY]
+        # 初回のみ：GitHub上の scores_data.json の内容をスプレッドシートへ移す
+        seed = _load_local(SCORES_FILE)
+        if seed:
+            _upsert(SCORES_KEY, seed)
+        return seed
+    return {}
+
+
+def save_json(filepath, data):
+    if not _use_gsheets():
+        _save_local(filepath, data)
+        return
+    try:
+        if filepath == SCORES_FILE:
+            _upsert(SCORES_KEY, data)
+        elif filepath == DATA_FILE:
+            for date_key, events in data.items():
+                _upsert(SCHEDULE_PREFIX + date_key, events)
+    except Exception:
+        st.error("保存に失敗しました。時間をおいてもう一度お試しください。")
+        st.stop()
+
+
+def save_day(date_key, events):
+    """1日分の予定・チェック状態だけを保存（他の端末の変更を上書きしないため）"""
+    if not _use_gsheets():
+        _save_local(DATA_FILE, st.session_state.db)
+        return
+    try:
+        _upsert(SCHEDULE_PREFIX + date_key, events)
+    except Exception:
+        st.error("保存に失敗しました。時間をおいてもう一度お試しください。")
+        st.stop()
+
+
+# 画面を表示するたびに最新のデータを読み込む（他の端末でのチェックも反映される）
+st.session_state.db = load_json(DATA_FILE)
+st.session_state.scores_db = load_json(SCORES_FILE)
+st.session_state.scores_db.setdefault("schools", [])
+st.session_state.scores_db.setdefault("results", [])
 
 
 def get_day_events(target_date):
@@ -274,7 +387,7 @@ with tab_cal:
 
         if updated:
             st.session_state.db[date_key] = day_events
-            save_json(DATA_FILE, st.session_state.db)
+            save_day(date_key, day_events)
             st.rerun()
 
     with st.expander("🛠️ この日の予定を追加・編集する"):
@@ -292,7 +405,7 @@ with tab_cal:
                     {"category": new_cat, "content": new_cnt, "done": False}
                 )
                 st.session_state.db[date_key] = day_events
-                save_json(DATA_FILE, st.session_state.db)
+                save_day(date_key, day_events)
                 st.success("予定を追加しました！")
                 st.rerun()
 
@@ -305,7 +418,7 @@ with tab_cal:
                 if c2.button("削除", key=f"del_{date_key}_{i}"):
                     day_events.pop(i)
                     st.session_state.db[date_key] = day_events
-                    save_json(DATA_FILE, st.session_state.db)
+                    save_day(date_key, day_events)
                     st.rerun()
 
 # TAB 2: 科目別テスト成績・志望校管理
